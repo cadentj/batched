@@ -20,19 +20,37 @@ prompts = [
 
 inputs = pack_sequences_for_causal_lm(tok, prompts, device=device)
 
-# %%
-
-print(inputs)
+print(inputs["position_ids"].shape)
 
 # %%
 
-def post_attn_hook(_module, _inputs, output):
+def post_attn_hook_zero(_module, _inputs, output):
+
+    inputs["position_ids"] = inputs["position_ids"][:, :6]
+
+    is_tuple = isinstance(output, tuple)
+    if is_tuple:
+        result = (
+            output[0][:, :6],
+            output[1:]
+        )
+    else:
+        result = output[:, :6]
+    
+    return result
+
+
+def post_attn_hook_one(_module, _inputs, output):
     print(output[0].shape)
     return output
 
-hook_ref = model.transformer.h[0].attn.register_forward_hook(post_attn_hook)
+hook_ref_zero = model.transformer.h[0].attn.register_forward_hook(post_attn_hook_zero)
+
+hook_ref_one = model.transformer.h[0].attn.register_forward_hook(post_attn_hook_one)
 
 with t.inference_mode():
     outputs = model(**inputs)
 
-hook_ref.remove()
+hook_ref_zero.remove()
+hook_ref_one.remove()
+# %%
