@@ -1,23 +1,15 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 import types
+from typing import Any
 
 import torch as t
-from pydantic import BaseModel
-from typing import Literal
 
-class Job(BaseModel):
-    status: Literal["queued", "running", "paused", "finished"]
-
-    # Sequences in a job are consecutive, so only maintain the start idx
-    start_idx: int
-
-    # Keep track of the sequence lengths for each sequence in the job
-    seq_lens: list[int]
-
-class Batch(BaseModel):
-    jobs: list[Job]
+HookDispatcher = Callable[[int, str, t.Tensor, t.Tensor | None], t.Tensor]
 
 
-def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
+def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
     """
     Minimal causal forward (no KV cache, no encoder cross-attn, no incremental
     decode). Custom block forwards may shorten the sequence; the final reshape
@@ -25,7 +17,9 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
     """
     import torch
     from transformers.masking_utils import create_causal_mask
-    from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+    from transformers.modeling_outputs import (
+        BaseModelOutputWithPastAndCrossAttentions,
+    )
 
     def forward(
         self,
@@ -41,15 +35,16 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
         use_cache=None,
         **kwargs,
     ):
-        # Signature matches HF for model(**inputs); only the causal packed path is implemented.
         del past_key_values, use_cache, encoder_hidden_states, encoder_attention_mask
 
         kwargs.pop("output_attentions", None)
         kwargs.pop("output_hidden_states", None)
 
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is not None:
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
+        if input_ids is not None:
             self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
             input_ids = input_ids.view(-1, input_shape[-1])
@@ -58,7 +53,9 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
             input_shape = inputs_embeds.size()[:-1]
             batch_size = inputs_embeds.shape[0]
         else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+            raise ValueError(
+                "You have to specify either input_ids or inputs_embeds"
+            )
 
         if token_type_ids is not None:
             token_type_ids = token_type_ids.view(-1, input_shape[-1])
@@ -94,7 +91,7 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
 
         hidden_states = self.drop(hidden_states)
 
-        for _i, block in enumerate(self.h):
+        for block in self.h:
             hidden_states = block(
                 hidden_states,
                 None,
@@ -109,7 +106,12 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
 
         hidden_states = self.ln_f(hidden_states)
         seq_len = hidden_states.shape[-2]
-        output_shape = (-1,) + input_shape[1:-1] + (seq_len,) + (hidden_states.size(-1),)
+        output_shape = (
+            (-1,)
+            + input_shape[1:-1]
+            + (seq_len,)
+            + (hidden_states.size(-1),)
+        )
         hidden_states = hidden_states.view(output_shape)
 
         return BaseModelOutputWithPastAndCrossAttentions(
@@ -120,20 +122,12 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer) -> None:
     transformer.forward = types.MethodType(forward, transformer)
 
 
-def create_gpt2_forward(batch: Batch):
-    trimmed: set[int] = set()
-
-    def trim(x: t.Tensor) -> t.Tensor:
-        for i, job in enumerate(batch.jobs):
-            if job.status == "paused" and i not in trimmed:
-                seq_len = sum(job.seq_lens)
-                x = t.cat([x[:, :job.start_idx], x[:, job.start_idx + seq_len:]], dim=1)
-                trimmed.add(i)
-        return x
-
+def create_async_gpt2_block_forward(
+    dispatch_hook: HookDispatcher,
+):
     def forward(
         self,
-        hidden_states: tuple[t.FloatTensor] | None,
+        hidden_states: t.FloatTensor | None,
         past_key_values: None = None,
         cache_position: t.LongTensor | None = None,
         attention_mask: t.FloatTensor | None = None,
@@ -142,6 +136,10 @@ def create_gpt2_forward(batch: Batch):
         use_cache: bool | None = False,
         **kwargs,
     ) -> t.Tensor:
+        del encoder_hidden_states, encoder_attention_mask
+
+        layer = self._batched_layer_idx
+
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         attn_output, _ = self.attn(
@@ -151,17 +149,32 @@ def create_gpt2_forward(batch: Batch):
             use_cache=use_cache,
             **kwargs,
         )
-        # residual connection
-        hidden_states = trim(attn_output + residual)
-
-        # NOTE(cadentj): Removed the encoder cross-attention here.
+        hidden_states = dispatch_hook(layer, "attn", attn_output, residual)
 
         residual = hidden_states
         hidden_states = self.ln_2(hidden_states)
-        feed_forward_hidden_states = self.mlp(hidden_states)
-        # residual connection
-        hidden_states = trim(residual + feed_forward_hidden_states)
+        mlp_output = self.mlp(hidden_states)
+        hidden_states = dispatch_hook(layer, "mlp", mlp_output, residual)
 
+        hidden_states = dispatch_hook(layer, "resid", hidden_states, None)
         return hidden_states
 
     return forward
+
+
+def patch_gpt2_blocks_for_async(
+    transformer: Any,
+    dispatch_hook: HookDispatcher,
+) -> None:
+    for layer, block in enumerate(transformer.h):
+        block._batched_layer_idx = layer
+        block.forward = types.MethodType(
+            create_async_gpt2_block_forward(dispatch_hook),
+            block,
+        )
+
+
+__all__ = [
+    "patch_gpt2_blocks_for_async",
+    "patch_gpt2_transformer_for_trimmed_sequences",
+]

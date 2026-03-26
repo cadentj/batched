@@ -71,18 +71,9 @@ class QueuedRequest:
     done: threading.Event = field(default_factory=threading.Event)
 
 
-@dataclass
-class Job:
-    request: Request
-    worker: WorkerSlot
-    batch_index: int
-    queued_request: QueuedRequest
-
-
 __all__ = [
     "CompiledHook",
     "Hook",
-    "Job",
     "QueuedRequest",
     "Request",
     "WorkerRequest",
