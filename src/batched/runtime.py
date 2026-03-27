@@ -484,16 +484,14 @@ class WrapperModel:
         if not jobs:
             return
 
-        if not self._poll_hook_jobs(jobs):
-            deadline = time.monotonic() + self._hook_wait_s
-            while time.monotonic() < deadline:
-                if self._poll_hook_jobs(jobs):
-                    break
-                time.sleep(0.001)
+        deadline = time.monotonic() + self._hook_wait_s
+        while time.monotonic() < deadline:
+            if self._poll_hook_jobs(jobs):
+                break
+            time.sleep(0.001)
 
-            if not any(job.pending_response is not None for job in jobs):
-                while not self._poll_hook_jobs(jobs):
-                    time.sleep(0.001)
+        if not any(job.pending_response is not None for job in jobs):
+            return
 
         grace_deadline = time.monotonic() + self._hook_wait_s
         while time.monotonic() < grace_deadline:

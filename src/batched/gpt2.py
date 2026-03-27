@@ -122,7 +122,7 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
     transformer.forward = types.MethodType(forward, transformer)
 
 
-def create_async_gpt2_block_forward(
+def _create_async_gpt2_block_forward(
     dispatch_hook: HookDispatcher,
 ):
     def forward(
@@ -169,7 +169,7 @@ def patch_gpt2_blocks_for_async(
     for layer, block in enumerate(transformer.h):
         block._batched_layer_idx = layer
         block.forward = types.MethodType(
-            create_async_gpt2_block_forward(dispatch_hook),
+            _create_async_gpt2_block_forward(dispatch_hook),
             block,
         )
 
