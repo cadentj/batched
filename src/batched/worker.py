@@ -87,6 +87,9 @@ class InterventionWorker:
             result = hook.fn(None, None, message.tensor)
             if not isinstance(result, t.Tensor):
                 raise TypeError("write_hook_must_return_tensor")
+            # If a hook returns the original IPC CUDA tensor, we must allocate
+            # fresh storage before sending it back across processes.
+            result = result.clone()
 
         self.pipe.send(
             WorkerResponse(

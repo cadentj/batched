@@ -1,6 +1,6 @@
 """Smoke test: three concurrent requests; one hook sleeps 10s at layer 0 attn.
 
-Run on a GPU machine (or CPU — slow). No pytest::
+Run on a CUDA machine with torch varlen attention support. No pytest::
 
     python examples/async_three_jobs.py
 """
@@ -13,23 +13,31 @@ import time
 import torch as t
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from batched import Hook, Request, WrapperModel
+from batched import (
+    Hook,
+    Request,
+    BatchedModel,
+    register_torch_varlen_attention,
+)
 
 
 def main() -> None:
-    device = "cuda" if t.cuda.is_available() else "cpu"
     model_name = "gpt2"
+    register_torch_varlen_attention("torch_varlen")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        attn_implementation="torch_varlen",
+    ).to("cuda:0").to(t.bfloat16)
     model.eval()
 
     slow_hook = (
         "def hook(_module, _inputs, output):\n"
         "    import time\n"
-        "    time.sleep(10)\n"
+        "    time.sleep(3)\n"
         "    return output\n"
     )
 
@@ -48,11 +56,11 @@ def main() -> None:
         Request(prompt="fast b", hooks={}),
     ]
 
-    runtime = WrapperModel(
+    runtime = BatchedModel(
         model=model,
         tokenizer=tokenizer,
         n=3,
-        batch_window_ms=0,
+        batch_window_ms=500,
         hook_wait_ms=100,
     )
 
@@ -65,11 +73,13 @@ def main() -> None:
         dt = time.perf_counter() - t0
         with lock:
             results.append((req.prompt, status, dt))
+            print(results, flush=True)
 
     threads = [
         threading.Thread(target=run_one, args=(req,), name=f"req-{i}")
         for i, req in enumerate(requests)
     ]
+    print("starting threads")
     for th in threads:
         th.start()
     for th in threads:

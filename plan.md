@@ -11,7 +11,7 @@
   - `transformer.h.{layer}.attn`
   - `transformer.h.{layer}.mlp`
   - `transformer.h.{layer}.resid`
-- Async path is default behavior in `WrapperModel`.
+- Async path is default behavior in `BatchedModel`.
 - Fail fast on unsupported model types or invalid hookpoints.
 - Toy/scratch implementation: minimal defensive checks and no production hardening.
 
@@ -55,7 +55,7 @@
 ## What Was Implemented
 
 ## 1) Runtime refactor (`src/batched/runtime.py`)
-- Added `hook_wait_ms: int = 50` to `WrapperModel`.
+- Added `hook_wait_ms: int = 50` to `BatchedModel`.
 - Added GPT-2-only validation via `config.model_type == "gpt2"`.
 - Removed old global module `register_forward_hook` path and synchronous full-batch waiting logic.
 - Added `LiveJob` state with cached tensors and pending hook metadata.
@@ -95,7 +95,7 @@
 - I used fail-fast assertions for unsupported shapes and states, matching the “toy/scratch” constraint.
 
 ## Config / API Change Summary
-- `WrapperModel(..., hook_wait_ms=50, ...)`
+- `BatchedModel(..., hook_wait_ms=50, ...)`
 - Default runtime is async GPT-2 path.
 - Backward compatibility with old synchronous non-GPT-2 path was intentionally removed.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
+import os
 import re
 import threading
 import time
@@ -15,17 +16,18 @@ from .gpt2 import (
     patch_gpt2_blocks_for_async,
     patch_gpt2_transformer_for_trimmed_sequences,
 )
+from .torch_varlen_attention import register_torch_varlen_attention
 from .types import QueuedRequest, Request, WorkerResponse, WorkerSlot
 from .worker import _worker_main
 
-try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-except ModuleNotFoundError:
-    AutoModelForCausalLM = Any
-    AutoTokenizer = Any
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 _HOOKPOINT_RE = re.compile(r"^transformer\.h\.(\d+)\.(attn|mlp|resid)$")
+_TORCH_VARLEN_ATTN_IMPL = "torch_varlen"
+
+
+class _AllJobsPaused(RuntimeError):
+    """Internal control-flow signal used when no job is runnable in this pass."""
 
 
 def _compose_gpt2_residual(
@@ -66,7 +68,7 @@ class LiveJob:
         return self.queued_request.request
 
 
-class WrapperModel:
+class BatchedModel:
     def __init__(
         self,
         model: AutoModelForCausalLM,
@@ -92,7 +94,9 @@ class WrapperModel:
 
         self.model = model
         self.model.eval()
+        register_torch_varlen_attention(_TORCH_VARLEN_ATTN_IMPL)
         self._validate_model_is_gpt2()
+        self._warn_if_mps_daemon_inactive(cuda_mps_pipe_directory)
 
         self.batch_window_ms = batch_window_ms
         self.hook_wait_ms = hook_wait_ms
@@ -125,12 +129,13 @@ class WrapperModel:
         self._scheduler.start()
 
     def _validate_model_is_gpt2(self) -> None:
-        model_type = getattr(
-            getattr(self.model, "config", None),
-            "model_type",
-            None,
-        )
+        config = getattr(self.model, "config", None)
+        model_type = getattr(config, "model_type", None)
         assert model_type == "gpt2", "only_gpt2_supported"
+        attn_impl = getattr(config, "_attn_implementation", None)
+        assert attn_impl == _TORCH_VARLEN_ATTN_IMPL, (
+            f"expected_attn_implementation:{_TORCH_VARLEN_ATTN_IMPL}:got:{attn_impl}"
+        )
 
     def _patch_model_for_async(self) -> None:
         patch_gpt2_blocks_for_async(
@@ -138,6 +143,31 @@ class WrapperModel:
             self._dispatch_gpt2_hook,
         )
         patch_gpt2_transformer_for_trimmed_sequences(self.model.transformer)
+
+    def _warn_if_mps_daemon_inactive(
+        self,
+        cuda_mps_pipe_directory: str | None,
+    ) -> None:
+        if self._model_device().type != "cuda":
+            return
+
+        pipe_directory = (
+            cuda_mps_pipe_directory
+            or os.environ.get("CUDA_MPS_PIPE_DIRECTORY")
+            or "/tmp/nvidia-mps"
+        )
+        control_socket = os.path.join(
+            pipe_directory,
+            "nvidia-cuda-mps-control",
+        )
+        if os.path.exists(control_socket):
+            return
+
+        print(
+            "Warning: CUDA MPS daemon appears inactive "
+            f"(missing {control_socket}). "
+            "Start it with `nvidia-cuda-mps-control -d`."
+        )
 
     def _spawn_workers(
         self,
@@ -314,6 +344,8 @@ class WrapperModel:
                 self.model(**inputs, use_cache=False)
             completed_jobs = list(self._pass_jobs)
             self._finish_live_jobs(completed_jobs, status="finished")
+        except _AllJobsPaused:
+            self._wait_for_any_pending_hook_job(self._pass_jobs)
         finally:
             self._pass_jobs = []
 
@@ -325,12 +357,11 @@ class WrapperModel:
 
     def _pack_pass_inputs(self, jobs: list[LiveJob]) -> dict[str, t.Tensor]:
         input_ids: list[int] = []
-        position_ids: list[int] = []
         for job in jobs:
             input_ids.extend(job.token_ids)
-            position_ids.extend(range(job.seq_len))
 
         device = self._model_device()
+        position_ids = self._packed_position_ids(jobs)
         return {
             "input_ids": t.tensor([input_ids], dtype=t.long, device=device),
             "position_ids": t.tensor(
@@ -339,6 +370,12 @@ class WrapperModel:
                 device=device,
             ),
         }
+
+    def _packed_position_ids(self, jobs: list[LiveJob]) -> list[int]:
+        position_ids: list[int] = []
+        for job in jobs:
+            position_ids.extend(range(job.seq_len))
+        return position_ids
 
     def _dispatch_gpt2_hook(
         self,
@@ -475,8 +512,15 @@ class WrapperModel:
             job.cached_residual_tensor = None
 
         if not next_chunks:
-            raise RuntimeError("all_jobs_paused")
+            raise _AllJobsPaused()
 
+        next_position_ids = t.tensor(
+            [self._packed_position_ids(next_jobs)],
+            dtype=t.long,
+            device=module_tensor.device,
+        )
+        self.model.transformer._batched_position_ids = next_position_ids
+        self.model.transformer._batched_cache_position = next_position_ids[0]
         self._pass_jobs = next_jobs
         return t.cat(next_chunks, dim=1)
 
@@ -520,6 +564,18 @@ class WrapperModel:
             completed = True
 
         return completed
+
+    def _wait_for_any_pending_hook_job(self, jobs: list[LiveJob]) -> None:
+        pending_jobs = [
+            job
+            for job in jobs
+            if job.pending_hookpoint is not None and job.pending_response is None
+        ]
+        assert pending_jobs, "no_pending_hook_jobs"
+        while True:
+            if self._poll_hook_jobs(pending_jobs):
+                return
+            time.sleep(0.001)
 
     def _finish_live_jobs(self, jobs: list[LiveJob], status: str) -> None:
         if not jobs:
@@ -633,4 +689,4 @@ class WrapperModel:
                 pass
 
 
-__all__ = ["WrapperModel"]
+__all__ = ["BatchedModel"]

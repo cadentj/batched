@@ -16,7 +16,6 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
     uses length after ln_f instead of the input length.
     """
     import torch
-    from transformers.masking_utils import create_causal_mask
     from transformers.modeling_outputs import (
         BaseModelOutputWithPastAndCrossAttentions,
     )
@@ -73,34 +72,28 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds.to(inputs_embeds.device)
 
-        if attention_mask is not None and attention_mask.ndim < 4:
-            attention_mask = attention_mask.view(batch_size, -1)
-
-        causal_mask = create_causal_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=None,
-            position_ids=position_ids,
-        )
-
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)
             hidden_states = hidden_states + token_type_embeds
 
         hidden_states = self.drop(hidden_states)
+        current_position_ids = position_ids
+        current_cache_position = cache_position
+        self._batched_position_ids = current_position_ids
+        self._batched_cache_position = current_cache_position
 
         for block in self.h:
+            current_position_ids = self._batched_position_ids
+            current_cache_position = self._batched_cache_position
             hidden_states = block(
                 hidden_states,
                 None,
-                cache_position,
-                causal_mask,
+                current_cache_position,
+                None,
                 None,
                 encoder_attention_mask=None,
                 use_cache=False,
-                position_ids=position_ids,
+                position_ids=current_position_ids,
                 **kwargs,
             )
 

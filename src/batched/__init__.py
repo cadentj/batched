@@ -3,12 +3,12 @@ from .torch_varlen_attention import (
     register_torch_varlen_attention,
     torch_varlen_attention_forward,
 )
-from .wrapper import Hook, Request, WrapperModel
+from .wrapper import Hook, Request, BatchedModel
 
 __all__ = [
     "Hook",
     "Request",
-    "WrapperModel",
+    "BatchedModel",
     "pack_sequences_for_causal_lm",
     "register_torch_varlen_attention",
     "torch_varlen_attention_forward",
