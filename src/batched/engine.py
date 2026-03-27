@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-import os
 import re
 import threading
 import time
@@ -19,6 +18,8 @@ from .gpt2 import (
 from .torch_varlen_attention import register_torch_varlen_attention
 from .types import QueuedRequest, Request, WorkerResponse, WorkerSlot
 from .worker import _worker_main
+from .utils import warn_if_mps_daemon_inactive
+from .const import DEVICE
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -95,8 +96,7 @@ class BatchedModel:
         self.model = model
         self.model.eval()
         register_torch_varlen_attention(_TORCH_VARLEN_ATTN_IMPL)
-        self._validate_model_is_gpt2()
-        self._warn_if_mps_daemon_inactive(cuda_mps_pipe_directory)
+        warn_if_mps_daemon_inactive(cuda_mps_pipe_directory)
 
         self.batch_window_ms = batch_window_ms
         self.hook_wait_ms = hook_wait_ms
@@ -128,46 +128,12 @@ class BatchedModel:
         )
         self._scheduler.start()
 
-    def _validate_model_is_gpt2(self) -> None:
-        config = getattr(self.model, "config", None)
-        model_type = getattr(config, "model_type", None)
-        assert model_type == "gpt2", "only_gpt2_supported"
-        attn_impl = getattr(config, "_attn_implementation", None)
-        assert attn_impl == _TORCH_VARLEN_ATTN_IMPL, (
-            f"expected_attn_implementation:{_TORCH_VARLEN_ATTN_IMPL}:got:{attn_impl}"
-        )
-
     def _patch_model_for_async(self) -> None:
         patch_gpt2_blocks_for_async(
             self.model.transformer,
             self._dispatch_gpt2_hook,
         )
         patch_gpt2_transformer_for_trimmed_sequences(self.model.transformer)
-
-    def _warn_if_mps_daemon_inactive(
-        self,
-        cuda_mps_pipe_directory: str | None,
-    ) -> None:
-        if self._model_device().type != "cuda":
-            return
-
-        pipe_directory = (
-            cuda_mps_pipe_directory
-            or os.environ.get("CUDA_MPS_PIPE_DIRECTORY")
-            or "/tmp/nvidia-mps"
-        )
-        control_socket = os.path.join(
-            pipe_directory,
-            "nvidia-cuda-mps-control",
-        )
-        if os.path.exists(control_socket):
-            return
-
-        print(
-            "Warning: CUDA MPS daemon appears inactive "
-            f"(missing {control_socket}). "
-            "Start it with `nvidia-cuda-mps-control -d`."
-        )
 
     def _spawn_workers(
         self,
@@ -360,14 +326,13 @@ class BatchedModel:
         for job in jobs:
             input_ids.extend(job.token_ids)
 
-        device = self._model_device()
         position_ids = self._packed_position_ids(jobs)
         return {
-            "input_ids": t.tensor([input_ids], dtype=t.long, device=device),
+            "input_ids": t.tensor([input_ids], dtype=t.long, device=DEVICE),
             "position_ids": t.tensor(
                 [position_ids],
                 dtype=t.long,
-                device=device,
+                device=DEVICE,
             ),
         }
 
@@ -630,13 +595,7 @@ class BatchedModel:
         message = WorkerResponse.model_validate(worker.pipe.recv())
         return message
 
-    def _model_device(self) -> t.device:
-        try:
-            return next(self.model.parameters()).device
-        except StopIteration:
-            return t.device("cpu")
-
-    def run_request(self, request: Request) -> str:
+    def __call__(self, request: Request) -> str:
         self._validate_request_hooks(request)
         queued_request = QueuedRequest(request=request)
 

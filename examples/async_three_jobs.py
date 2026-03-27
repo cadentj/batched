@@ -1,10 +1,3 @@
-"""Smoke test: three concurrent requests; one hook sleeps 10s at layer 0 attn.
-
-Run on a CUDA machine with torch varlen attention support. No pytest::
-
-    python examples/async_three_jobs.py
-"""
-
 from __future__ import annotations
 
 import threading
@@ -69,7 +62,7 @@ def main() -> None:
 
     def run_one(req: Request) -> None:
         t0 = time.perf_counter()
-        status = runtime.run_request(req)
+        status = runtime(req)
         dt = time.perf_counter() - t0
         with lock:
             results.append((req.prompt, status, dt))

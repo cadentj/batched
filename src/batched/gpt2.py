@@ -34,57 +34,27 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
         use_cache=None,
         **kwargs,
     ):
-        del past_key_values, use_cache, encoder_hidden_states, encoder_attention_mask
+        del past_key_values, use_cache, encoder_hidden_states, encoder_attention_mask, inputs_embeds, token_type_ids,
+        cache_position
+
+        assert position_ids is not None
 
         kwargs.pop("output_attentions", None)
         kwargs.pop("output_hidden_states", None)
 
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time"
-            )
-        if input_ids is not None:
-            self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
-            input_shape = input_ids.size()
-            input_ids = input_ids.view(-1, input_shape[-1])
-            batch_size = input_ids.shape[0]
-        elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
-            batch_size = inputs_embeds.shape[0]
-        else:
-            raise ValueError(
-                "You have to specify either input_ids or inputs_embeds"
-            )
 
-        if token_type_ids is not None:
-            token_type_ids = token_type_ids.view(-1, input_shape[-1])
-
-        if inputs_embeds is None:
-            inputs_embeds = self.wte(input_ids)
-
-        if cache_position is None:
-            cache_position = torch.arange(
-                0, inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+        input_shape = input_ids.size()
+        input_ids = input_ids.view(-1, input_shape[-1])
+        inputs_embeds = self.wte(input_ids)
 
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds.to(inputs_embeds.device)
 
-        if token_type_ids is not None:
-            token_type_embeds = self.wte(token_type_ids)
-            hidden_states = hidden_states + token_type_embeds
-
         hidden_states = self.drop(hidden_states)
-        current_position_ids = position_ids
-        current_cache_position = cache_position
-        self._batched_position_ids = current_position_ids
-        self._batched_cache_position = current_cache_position
+        self._batched_position_ids = position_ids
 
         for block in self.h:
-            current_position_ids = self._batched_position_ids
-            current_cache_position = self._batched_cache_position
+            current_cache_position = None
             hidden_states = block(
                 hidden_states,
                 None,
@@ -93,7 +63,7 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
                 None,
                 encoder_attention_mask=None,
                 use_cache=False,
-                position_ids=current_position_ids,
+                position_ids=self._batched_position_ids,
                 **kwargs,
             )
 
@@ -122,7 +92,7 @@ def _create_async_gpt2_block_forward(
         self,
         hidden_states: t.FloatTensor | None,
         past_key_values: None = None,
-        cache_position: t.LongTensor | None = None,
+        _cache_position: t.LongTensor | None = None,
         attention_mask: t.FloatTensor | None = None,
         encoder_hidden_states: t.Tensor | None = None,
         encoder_attention_mask: t.FloatTensor | None = None,
