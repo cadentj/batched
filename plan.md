@@ -58,7 +58,7 @@
 - Added `hook_wait_ms: int = 50` to `BatchedModel`.
 - Added GPT-2-only validation via `config.model_type == "gpt2"`.
 - Removed old global module `register_forward_hook` path and synchronous full-batch waiting logic.
-- Added `LiveJob` state with cached tensors and pending hook metadata.
+- Added `Job` state with cached tensors and pending hook metadata.
 - Added persistent live-job scheduling:
   - queue claims + worker assignment
   - start request on worker once

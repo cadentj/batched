@@ -3,18 +3,26 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
+import re
 import threading
 from typing import Any, Literal
 from uuid import uuid4
 
 import torch.multiprocessing as mp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator, field_validator
 
+_HOOKPOINT_RE = re.compile(r"^transformer\.h\.(\d+)\.(attn|mlp|resid)$")
 
 class Hook(BaseModel):
     fn: str
     hookpoint: str
     op: Literal["read", "write"]
+
+    @model_validator(mode="after")
+    def validate_hookpoint(self) -> Hook:
+        match = _HOOKPOINT_RE.match(self.hookpoint)
+        assert match is not None, f"unsupported_hookpoint:{self.hookpoint}"
+        return self
 
 
 class Request(BaseModel):
@@ -27,6 +35,15 @@ class Request(BaseModel):
             hookpoint: hook.model_dump(mode="python")
             for hookpoint, hook in self.hooks.items()
         }
+
+    @field_validator("prompt", mode="after")
+    @classmethod
+    def has_prompt(cls, v: str) -> str:
+        if len(v) == 0:
+            raise ValueError("empty_prompt")
+        return v
+
+    
 
 
 class WorkerRequest(BaseModel):
