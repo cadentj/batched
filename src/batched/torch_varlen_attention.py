@@ -38,31 +38,6 @@ def _get_target_dtype(query: torch.Tensor, module: torch.nn.Module) -> torch.dty
     return None
 
 
-def pack_sequences_for_causal_lm(
-    tokenizer,
-    texts: Sequence[str],
-    device: torch.device | str,
-    add_special_tokens: bool = False,
-) -> dict[str, torch.LongTensor]:
-    """
-    Concatenate tokenized strings into one batch row with `position_ids` restarting
-    at 0 per sequence (HF packed convention for varlen).
-    """
-    all_ids: list[int] = []
-    all_pos: list[int] = []
-    for t in texts:
-        ids = tokenizer(t, add_special_tokens=add_special_tokens)["input_ids"]
-        all_ids.extend(ids)
-        all_pos.extend(range(len(ids)))
-    dev_kw = {} if device is None else {"device": device}
-    input_ids = torch.tensor([all_ids], dtype=torch.long, **dev_kw)
-    position_ids = torch.tensor([all_pos], dtype=torch.long, **dev_kw)
-    return {
-        "input_ids": input_ids,
-        "position_ids": position_ids,
-    }
-
-
 def _apply_custom_scaling(query: torch.Tensor, scaling: float | None) -> torch.Tensor:
     if scaling is None:
         return query

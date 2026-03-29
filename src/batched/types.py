@@ -27,7 +27,7 @@ class Hook(BaseModel):
 
 class Request(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
-    prompt: str
+    input_ids: list[int]
     hooks: dict[str, Hook] = Field(default_factory=dict)
 
     def dump_hooks(self) -> dict[str, dict[str, Any]]:

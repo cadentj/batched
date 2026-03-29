@@ -34,9 +34,12 @@ def main() -> None:
         "    return output\n"
     )
 
+    def tokenize(prompt: str) -> list[int]:
+        return tokenizer(prompt, add_special_tokens=False)["input_ids"]
+
     requests = [
         Request(
-            prompt="slow job",
+            input_ids=tokenize("slow job"),
             hooks={
                 "transformer.h.0.attn": Hook(
                     hookpoint="transformer.h.0.attn",
@@ -45,8 +48,8 @@ def main() -> None:
                 ),
             },
         ),
-        Request(prompt="fast a", hooks={}),
-        Request(prompt="fast b", hooks={}),
+        Request(input_ids=tokenize("fast a"), hooks={}),
+        Request(input_ids=tokenize("fast b"), hooks={}),
     ]
 
     runtime = BatchedModel(

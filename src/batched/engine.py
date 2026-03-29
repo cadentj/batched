@@ -16,16 +16,16 @@ from .utils import warn_if_mps_daemon_inactive
 class Job:
     worker: WorkerSlot
     queued_request: QueuedRequest
-    token_ids: list[int]
+    input_ids: list[int]
     seq_len: int
-    pass_start_idx: int = 0
+    
     pending_hookpoint: str | None = None
     pending_response: WorkerResponse | None = None
-    cached_module_tensor: t.Tensor | None = None
+
     cached_residual_tensor: t.Tensor | None = None
 
-    start_idx: int = 0
-    is_paused: bool = False
+    idx_in_batch: int = 0
+    is_alive: bool = True
 
     @property
     def request(self) -> Request:
@@ -41,6 +41,33 @@ class Batch:
 
     def extend(self, jobs: list[Job]) -> None:
         self.jobs.extend(jobs)
+
+    def alive_jobs(self, hookpoint: str) -> list[Job]:
+        """
+        Get the list of alive jobs with the given hookpoint and set their idx_in_batch.
+
+        Returns:
+            list[Job]: A list of alive jobs with their idx_in_batch set.
+        """
+        jobs = []
+        idx_ptr = 0
+        for job in self.jobs:
+            if job.is_alive and hookpoint in job.request.hooks:
+                job.idx_in_batch = idx_ptr
+                idx_ptr += job.seq_len
+                jobs.append(job)
+        return jobs
+
+    def packed_position_ids(self, alive_only: bool = True) -> list[int]:
+        if alive_only:
+            jobs = self.alive_jobs()
+        else:
+            jobs = self.jobs
+        position_ids: list[int] = []
+        for job in jobs:
+            position_ids.extend(range(job.seq_len))
+        return position_ids
+
 
 class Engine: 
     def __init__(
@@ -153,10 +180,6 @@ class Engine:
         worker: WorkerSlot,
     ) -> Job:
         request = queued_request.request
-        token_ids = self._tokenizer(
-            request.prompt,
-            add_special_tokens=False,
-        )["input_ids"]
         
         worker.pipe.send(
             {
@@ -173,8 +196,8 @@ class Engine:
         return Job(
             worker=worker,
             queued_request=queued_request,
-            token_ids=token_ids,
-            seq_len=len(token_ids),
+            input_ids=request.input_ids,
+            seq_len=len(request.input_ids),
         )
 
     def _wait_for_request_batch(
