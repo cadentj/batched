@@ -38,6 +38,7 @@ class Request(BaseModel):
     hooks: dict[str, Hook] = Field(default_factory=dict)
 
     done: threading.Event = field(default_factory=threading.Event)
+    status: str = "none"
 
     @model_serializer(mode="json")
     def serialize(self) -> dict[str, Any]:

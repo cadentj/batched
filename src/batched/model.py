@@ -50,7 +50,7 @@ def create_packed_input(batch: Batch) -> dict[str, t.Tensor]:
     input_ids: list[int] = []
     position_ids: list[int] = []
     for job in batch.jobs:
-        input_ids.extend(job.token_ids)
+        input_ids.extend(job.request.input_ids)
         position_ids.extend(range(job.seq_len))
 
     return {
@@ -160,10 +160,10 @@ class BatchedModel(Engine):
             op = job.request.hooks[hookpoint].op
 
             # A) Set jobs that didn't finish to dead and cache their activations
-            if job.pending_hookpoint is None and job.pending_response is None:
+            if job.pending_hookpoint is None and job.computed_response is None:
                 job.is_alive = False
                 job.pending_hookpoint = hookpoint
-                job.pending_response = None
+                job.computed_response = None
                 job.cached_residual_tensor = (
                     None
                     if residual_slice is None
@@ -192,31 +192,31 @@ class BatchedModel(Engine):
                 continue
 
             # Write jobs have a pending response
-            assert job.pending_response is not None
+            assert job.computed_response is not None
 
             # C) For jobs w pending hook points, combine
             if job.pending_hookpoint is not None:
                 if hook_kind == "resid":
-                    combined = job.pending_response.tensor.unsqueeze(0)
+                    combined = job.computed_response.tensor.unsqueeze(0)
                 else:
                     combined = (
-                        job.pending_response.tensor + job.cached_residual_tensor
+                        job.computed_response.tensor + job.cached_residual_tensor
                     ).unsqueeze(0)
 
             # D) For jobs without pending hooks, use current residual tensor
             if job.pending_hookpoint is None:
                 if hook_kind == "resid":
-                    combined = job.pending_response.tensor.unsqueeze(0)
+                    combined = job.computed_response.tensor.unsqueeze(0)
 
                 else:
                     combined = (
-                        job.pending_response.tensor + residual_slice
+                        job.computed_response.tensor + residual_slice
                     ).unsqueeze(0)
 
             next_chunks.append(combined)
 
             job.pending_hookpoint = None
-            job.pending_response = None
+            job.computed_response = None
             job.cached_residual_tensor = None
 
         if not next_chunks:
@@ -232,7 +232,6 @@ class BatchedModel(Engine):
         )
 
         self.model.transformer._batched_position_ids = next_position_ids
-        # self.model.transformer._batched_cache_position = next_position_ids[0]
         return t.cat(next_chunks, dim=1)
 
     def _wait_for_hook_jobs(self, jobs: list[Job]) -> None:
@@ -265,7 +264,7 @@ class BatchedModel(Engine):
             job.worker.pipe: job
             for job in jobs
             if job.pending_hookpoint is not None
-            and job.pending_response is None
+            and job.computed_response is None
         }
         assert pending, "no_pending_hook_jobs"
 
@@ -279,7 +278,7 @@ class BatchedModel(Engine):
         assert message.type == "hooks_applied"
         assert message.request_id == job.request.id
         message.tensor = _normalize_worker_hook_tensor(message.tensor)
-        job.pending_response = message
+        job.computed_response = message
 
     def _finish_live_jobs(self, jobs: list[Job], status: str) -> None:
         if not jobs:
@@ -295,7 +294,7 @@ class BatchedModel(Engine):
                     message.tensor = _normalize_worker_hook_tensor(
                         message.tensor
                     )
-                    job.pending_response = message
+                    job.computed_response = message
                     continue
                 if message.type != "request_finished":
                     raise RuntimeError(
@@ -303,9 +302,9 @@ class BatchedModel(Engine):
                     )
                 break
 
-            if job.queued_request.status == "queued":
-                job.queued_request.status = status
-            job.queued_request.done.set()
+            if job.request.status == "queued":
+                job.request.status = status
+            job.request.done.set()
 
         finished_ids = {job.request.id for job in jobs}
         with self._condition:

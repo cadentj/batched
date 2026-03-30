@@ -12,6 +12,8 @@ from .types import (
     WorkerRequest,
     WorkerRequestRuntime,
     WorkerResponse,
+    StartRequest,
+    HookRequest,
 )
 
 
@@ -44,7 +46,7 @@ class InterventionWorker:
             raise ValueError("missing_hook")
         return hook_fn
 
-    def _start_request(self, message: WorkerRequest) -> None:
+    def _start_request(self, message: StartRequest) -> None:
         self._current_request_id = None
         self._current_request_runtime = None
         scope: dict[str, Any] = {"torch": t, "t": t, "state": {}}
@@ -75,7 +77,7 @@ class InterventionWorker:
             )
         )
 
-    def _apply_hooks(self, message: WorkerRequest) -> None:
+    def _apply_hooks(self, message: HookRequest) -> None:
         if self._current_request_runtime is None:
             raise RuntimeError(f"missing_runtime:{message.request_id}")
         if not isinstance(message.tensor, t.Tensor):
@@ -109,7 +111,7 @@ class InterventionWorker:
             if not self.pipe.poll(0.05):
                 continue
 
-            message = WorkerRequest.model_validate(self.pipe.recv())
+            message = WorkerRequest.model_validate(self.pipe.recv()).req
 
             if message.type == "start_request":
                 self._start_request(message)

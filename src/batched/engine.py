@@ -21,12 +21,13 @@ class Job:
     seq_len: int
 
     pending_hookpoint: str | None = None
-    pending_response: WorkerResponse | None = None
+    computed_response: WorkerResponse | None = None
 
     cached_residual_tensor: t.Tensor | None = None
 
     idx_in_batch: int = 0
     is_alive: bool = True
+
 @dataclass
 class Batch:
     jobs: list[Job]
