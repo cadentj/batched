@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from multiprocessing.connection import Connection
+from multiprocessing.connection import wait, Connection
 
 import time
 from typing import Any
@@ -12,11 +12,11 @@ from .gpt2 import (
     patch_gpt2_transformer_for_trimmed_sequences,
 )
 from .torch_varlen_attention import register_torch_varlen_attention
-from .types import QueuedRequest, Request, WorkerResponse, WorkerSlot
+from .types import Request, WorkerResponse, WorkerSlot
 from .const import DEVICE
 from .engine import Engine, Job, Batch
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 _TORCH_VARLEN_ATTN_IMPL = "torch_varlen"
 
@@ -118,28 +118,30 @@ class BatchedModel(Engine):
         module_tensor: t.Tensor,
         residual_tensor: t.Tensor | None,
     ) -> t.Tensor:
-        """Rebuild packed hidden state after optional worker rewrites.
-
-        Shapes: ``module_tensor`` / ``residual_tensor`` are the full packed batch
-        ``[1, total_seq, d_model]``. Per-job slices are ``[1, job_seq, d_model]``;
-        we cache ``[job_seq, d_model]`` for apply_hooks / resume.
-
-        If a job is paused at a different hookpoint than ``hookpoint``, it still
-        advances with the default residual path; hooks registered on *earlier*
-        layers are not re-run on a later forward pass until the job returns to
-        its paused hookpoint (retry semantics).
-        """
-
         hookpoint = f"transformer.h.{layer}.{hook_kind}"
+        live_jobs = self._batch.live_jobs()
 
-        # 1) Execute hooks for all jobs at this hookpoint
-        hook_jobs: list[Job] = []
-        for job in self._batch.alive_jobs(hookpoint):
+        # 1) Execute jobs at this hookpoint
+        next_chunks: list[t.Tensor] = []
+        sent_jobs: list[Job] = []
+        for job in live_jobs:
             start = job.idx_in_batch
             end = start + job.seq_len
             module_slice = module_tensor[:, start:end, :]
+            residual_slice = (
+                None
+                if residual_tensor is None
+                else residual_tensor[:, start:end, :]
+            )
 
-            if job.pending_hookpoint is None:
+            if hookpoint not in job.request.hooks:
+                next_chunks.append(
+                    _compose_gpt2_residual(
+                        hook_kind, module_slice, residual_slice
+                    )
+                )
+
+            if hookpoint in job.request.hooks:
                 job.worker.pipe.send(
                     {
                         "type": "apply_hooks",
@@ -148,41 +150,20 @@ class BatchedModel(Engine):
                         "tensor": module_slice,
                     }
                 )
-
-            hook_jobs.append(job)
+                sent_jobs.append(job)
 
         # 2) Wait for all jobs to finish
-        self._wait_for_hook_jobs(hook_jobs)
+        self._wait_for_hook_jobs(sent_jobs)
 
         # 3) Recombine the results
-        next_chunks: list[t.Tensor] = []
-        for job in self._batch.alive_jobs():
-            # If the job isn't at this hookpoint, combine
-            if hookpoint not in job.request.hooks:
-                start = job.idx_in_batch
-                end = start + job.seq_len
-                module_slice = module_tensor[:, start:end, :]
-                residual_slice = (
-                    None
-                    if residual_tensor is None
-                    else residual_tensor[:, start:end, :]
-                )
-                next_chunks.append(
-                    _compose_gpt2_residual(
-                        hook_kind, module_slice, residual_slice
-                    )
-                )
-                continue
+        for job in sent_jobs:
+            op = job.request.hooks[hookpoint].op
 
-            # Set jobs that didn't finish to dead and cache their activations
-            if job.pending_response is None:
+            # A) Set jobs that didn't finish to dead and cache their activations
+            if job.pending_hookpoint is None and job.pending_response is None:
                 job.is_alive = False
                 job.pending_hookpoint = hookpoint
                 job.pending_response = None
-                # Cache 2d activations for recombine after worker write
-                job.cached_module_tensor = (
-                    None if hook_kind == "resid" else module_slice[0].clone()
-                )
                 job.cached_residual_tensor = (
                     None
                     if residual_slice is None
@@ -190,40 +171,59 @@ class BatchedModel(Engine):
                 )
                 continue
 
-            # can't just get the module_slice,
-            # cached tensor might be from a previous forward pass
-            # so should just check whether
-            hook_tensor = (
-                job.cached_module_tensor
-                if job.cached_module_tensor is not None
-                else job.pending_response.tensor
+            start = job.idx_in_batch
+            end = start + job.seq_len
+            module_slice = module_tensor[:, start:end, :]
+            residual_slice = (
+                None
+                if residual_tensor is None
+                else residual_tensor[:, start:end, :]
             )
 
-            residual_tensor = (
-                job.pending_response.tensor
-                if job.pending_response is not None
-                else job.cached_residual_tensor
-            )
+            assert isinstance(residual_slice, t.Tensor)
 
-            if hook_kind == "resid":
-                # Back to [1, seq, d_model] for concat along sequence dim
-                combined = residual_tensor.unsqueeze(0)
-            else:
-                combined = (hook_tensor + job.cached_residual_tensor).unsqueeze(
-                    0
+            # B) For read jobs, append
+            if op == "read":
+                next_chunks.append(
+                    _compose_gpt2_residual(
+                        hook_kind, module_slice, residual_slice
+                    )
                 )
+                continue
+
+            # Write jobs have a pending response
+            assert job.pending_response is not None
+
+            # C) For jobs w pending hook points, combine
+            if job.pending_hookpoint is not None:
+                if hook_kind == "resid":
+                    combined = job.pending_response.tensor.unsqueeze(0)
+                else:
+                    combined = (
+                        job.pending_response.tensor + job.cached_residual_tensor
+                    ).unsqueeze(0)
+
+            # D) For jobs without pending hooks, use current residual tensor
+            if job.pending_hookpoint is None:
+                if hook_kind == "resid":
+                    combined = job.pending_response.tensor.unsqueeze(0)
+
+                else:
+                    combined = (
+                        job.pending_response.tensor + residual_slice
+                    ).unsqueeze(0)
 
             next_chunks.append(combined)
 
             job.pending_hookpoint = None
             job.pending_response = None
-            job.cached_module_tensor = None
             job.cached_residual_tensor = None
 
         if not next_chunks:
             raise AllJobsPaused()
 
         # Create updated position ids
+        # NOTE(cadentj): This is wrong.
         next_position_ids = self._batch.packed_position_ids()
         next_position_ids = t.tensor(
             [next_position_ids],
@@ -232,74 +232,58 @@ class BatchedModel(Engine):
         )
 
         self.model.transformer._batched_position_ids = next_position_ids
-        self.model.transformer._batched_cache_position = next_position_ids[0]
+        # self.model.transformer._batched_cache_position = next_position_ids[0]
         return t.cat(next_chunks, dim=1)
 
     def _wait_for_hook_jobs(self, jobs: list[Job]) -> None:
         if not jobs:
             return
 
+        pending: dict[Connection, Job] = {
+            job.worker.pipe: job for job in jobs
+        }
+
+        adjusted = False
         deadline = time.monotonic() + self._hook_wait_s
-        while time.monotonic() < deadline:
-            if self._poll_hook_jobs(jobs):
+
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            time.sleep(0.001)
+            ready = wait(pending.keys(), timeout=remaining)
+            for pipe in ready:
+                job = pending.pop(pipe)
+                self._recv_hook_response(job)
 
-        if not any(job.pending_response is not None for job in jobs):
-            return
-
-        grace_deadline = time.monotonic() + self._hook_wait_s
-        while time.monotonic() < grace_deadline:
-            self._poll_hook_jobs(jobs)
-            if all(job.pending_response is not None for job in jobs):
-                break
-            time.sleep(0.001)
-
-    def _poll_hook_jobs(self, jobs: list[Job]) -> bool:
-        completed = False
-        for job in jobs:
-            if job.pending_response is not None:
-                continue
-            if not job.worker.pipe.poll(0):
-                continue
-
-            message = WorkerResponse.model_validate(job.worker.pipe.recv())
-            assert message.type == "hooks_applied", (
-                f"unexpected_worker_message:{message.type}"
-            )
-            assert message.request_id == job.request.id, (
-                f"request_id_mismatch:{message.request_id}:{job.request.id}"
-            )
-            message.tensor = _normalize_worker_hook_tensor(message.tensor)
-            job.pending_response = message
-            completed = True
-
-        return completed
+            # If at least one completed, wait a bit longer
+            if len(pending) < len(jobs) and not adjusted:
+                deadline = time.monotonic() + self._hook_wait_s
+                adjusted = True
 
     def _wait_for_any_pending_hook_job(self, jobs: list[Job]) -> None:
-        pending_jobs = [
-            job
+        pending: dict[Connection, Job] = {
+            job.worker.pipe: job
             for job in jobs
             if job.pending_hookpoint is not None
             and job.pending_response is None
-        ]
-        assert pending_jobs, "no_pending_hook_jobs"
-        while True:
-            if self._poll_hook_jobs(pending_jobs):
-                return
-            time.sleep(0.001)
+        }
+        assert pending, "no_pending_hook_jobs"
+
+        # blocks until at least one pipe is ready — no sleep loop
+        ready: list[Connection] = wait(pending.keys())  # type: ignore
+        for pipe in ready:
+            self._recv_hook_response(pending[pipe])
+
+    def _recv_hook_response(self, job: Job) -> None:
+        message = WorkerResponse.model_validate(job.worker.pipe.recv())
+        assert message.type == "hooks_applied"
+        assert message.request_id == job.request.id
+        message.tensor = _normalize_worker_hook_tensor(message.tensor)
+        job.pending_response = message
 
     def _finish_live_jobs(self, jobs: list[Job], status: str) -> None:
         if not jobs:
             return
-
-        for job in jobs:
-            job.worker.pipe.send(
-                {
-                    "type": "finish_request",
-                    "request_id": job.request.id,
-                }
-            )
 
         for job in jobs:
             while True:
@@ -345,16 +329,14 @@ class BatchedModel(Engine):
         return message
 
     def __call__(self, request: Request) -> str:
-        queued_request = QueuedRequest(request=request)
-
         with self._condition:
             if self._closed:
                 return "wrapper_closed"
-            self._pending_requests.append(queued_request)
+            self._pending_requests.append(request)
             self._condition.notify_all()
 
-        queued_request.done.wait()
-        return queued_request.status
+        request.done.wait()
+        return request.status
 
 
 __all__ = ["BatchedModel"]

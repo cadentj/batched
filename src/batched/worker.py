@@ -25,7 +25,8 @@ class InterventionWorker:
         self.worker_id = worker_id
         self.pipe = pipe
         self.shutdown = shutdown
-        self._requests: dict[str, WorkerRequestRuntime] = {}
+        self._current_request_id: str | None = None
+        self._current_request_runtime: WorkerRequestRuntime | None = None
 
     def _compile_hook(
         self,
@@ -44,6 +45,8 @@ class InterventionWorker:
         return hook_fn
 
     def _start_request(self, message: WorkerRequest) -> None:
+        self._current_request_id = None
+        self._current_request_runtime = None
         scope: dict[str, Any] = {"torch": t, "t": t, "state": {}}
 
         compiled_hooks: dict[str, CompiledHook] = {}
@@ -60,7 +63,8 @@ class InterventionWorker:
                 fn=hook_fn,
             )
 
-        self._requests[message.request_id] = WorkerRequestRuntime(
+        self._current_request_id = message.request_id
+        self._current_request_runtime = WorkerRequestRuntime(
             hooks=compiled_hooks,
             scope=scope,
         )
@@ -72,14 +76,13 @@ class InterventionWorker:
         )
 
     def _apply_hooks(self, message: WorkerRequest) -> None:
-        runtime = self._requests.get(message.request_id)
-        if runtime is None:
+        if self._current_request_runtime is None:
             raise RuntimeError(f"missing_runtime:{message.request_id}")
         if not isinstance(message.tensor, t.Tensor):
             raise TypeError("missing_tensor")
 
         hookpoint = message.hookpoint
-        hook = runtime.hooks[hookpoint]
+        hook = self._current_request_runtime.hooks[hookpoint]
         if hook.op == "read":
             hook.fn(None, None, message.tensor)
             result = None
@@ -99,15 +102,6 @@ class InterventionWorker:
             )
         )
 
-    def _finish_request(self, message: WorkerRequest) -> None:
-        self._requests.pop(message.request_id, None)
-        self.pipe.send(
-            WorkerResponse(
-                type="request_finished",
-                request_id=message.request_id,
-            )
-        )
-
     def run(self) -> None:
         self.pipe.send({"type": "worker_ready", "worker_id": self.worker_id})
 
@@ -122,9 +116,6 @@ class InterventionWorker:
                 continue
             if message.type == "apply_hooks":
                 self._apply_hooks(message)
-                continue
-            if message.type == "finish_request":
-                self._finish_request(message)
                 continue
             if message.type == "shutdown":
                 return

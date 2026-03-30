@@ -7,18 +7,19 @@ import time
 import threading
 import torch as t
 import torch.multiprocessing as mp
-from .types import QueuedRequest, Request, WorkerResponse, WorkerSlot
+from .types import Request, WorkerResponse, WorkerSlot
 
 from .worker import _worker_main
 from .utils import warn_if_mps_daemon_inactive
 
+
 @dataclass
 class Job:
     worker: WorkerSlot
-    queued_request: QueuedRequest
+    request: Request
     input_ids: list[int]
     seq_len: int
-    
+
     pending_hookpoint: str | None = None
     pending_response: WorkerResponse | None = None
 
@@ -26,13 +27,8 @@ class Job:
 
     idx_in_batch: int = 0
     is_alive: bool = True
-
-    @property
-    def request(self) -> Request:
-        return self.queued_request.request
-
 @dataclass
-class Batch: 
+class Batch:
     jobs: list[Job]
 
     @property
@@ -42,25 +38,26 @@ class Batch:
     def extend(self, jobs: list[Job]) -> None:
         self.jobs.extend(jobs)
 
-    def alive_jobs(self, hookpoint: str) -> list[Job]:
+    def live_jobs(self) -> list[Job]:
         """
         Get the list of alive jobs with the given hookpoint and set their idx_in_batch.
 
         Returns:
             list[Job]: A list of alive jobs with their idx_in_batch set.
         """
-        jobs = []
         idx_ptr = 0
+        jobs: list[Job] = []
         for job in self.jobs:
-            if job.is_alive and hookpoint in job.request.hooks:
+            if job.is_alive:
                 job.idx_in_batch = idx_ptr
                 idx_ptr += job.seq_len
                 jobs.append(job)
+
         return jobs
 
-    def packed_position_ids(self, alive_only: bool = True) -> list[int]:
+    def packed_position_ids(self) -> list[int]:
         if alive_only:
-            jobs = self.alive_jobs()
+            jobs = self.live_jobs()
         else:
             jobs = self.jobs
         position_ids: list[int] = []
@@ -69,7 +66,7 @@ class Batch:
         return position_ids
 
 
-class Engine: 
+class Engine:
     def __init__(
         self,
         n: int = 1,
@@ -81,17 +78,17 @@ class Engine:
         assert n > 0, "n must be positive"
         assert batch_window_ms >= 0, "batch_window_ms must be non-negative"
         if worker_memory_fraction is not None:
-            assert 0.0 < worker_memory_fraction <= 1.0, (
-                "worker_memory_fraction must be in the range (0, 1]"
-            )
+            assert (
+                0.0 < worker_memory_fraction <= 1.0
+            ), "worker_memory_fraction must be in the range (0, 1]"
         if cuda_mps_active_thread_percentage is not None:
-            assert 1 <= cuda_mps_active_thread_percentage <= 100, (
-                "cuda_mps_active_thread_percentage must be in the range [1, 100]"
-            )
+            assert (
+                1 <= cuda_mps_active_thread_percentage <= 100
+            ), "cuda_mps_active_thread_percentage must be in the range [1, 100]"
 
         warn_if_mps_daemon_inactive(cuda_mps_pipe_directory)
 
-        self._pending_requests: deque[QueuedRequest] = deque()
+        self._pending_requests: deque[Request] = deque()
         self._idle_workers: deque[WorkerSlot] = deque()
 
         # CUDA tensor IPC between processes requires spawn-safe workers.
@@ -99,10 +96,8 @@ class Engine:
         self._shutdown = self._mp_context.Event()
         self._condition = threading.Condition()
         self._closed = False
-        self._pending_requests: deque[QueuedRequest] = deque()
-        # self._live_jobs: list[Job] = []
-        # self._pass_jobs: list[Job] = []
-        self._batch: Batch = Batch()    
+
+        self._batch: Batch = Batch(jobs=[])
         self.batch_window_ms = batch_window_ms
 
         self._workers = self._spawn_workers(
@@ -135,7 +130,7 @@ class Engine:
 
     def _next_cycle_jobs(self) -> Batch | None:
         while True:
-            assignments: list[tuple[QueuedRequest, WorkerSlot]] = []
+            assignments: list[tuple[Request, WorkerSlot]] = []
             # 1) Wait for new requests to arrive.
             with self._condition:
                 while True:
@@ -158,10 +153,10 @@ class Engine:
 
             # 2) Start new jobs.
             new_jobs: list[Job] = []
-            for queued_request, worker in assignments:
+            for request, worker in assignments:
                 new_jobs.append(
-                    self._start_live_job(
-                        queued_request=queued_request,
+                    self._start_job(
+                        request=request,
                         worker=worker,
                     )
                 )
@@ -176,38 +171,35 @@ class Engine:
 
     def _start_job(
         self,
-        queued_request: QueuedRequest,
+        request: Request,
         worker: WorkerSlot,
     ) -> Job:
-        request = queued_request.request
-        
         worker.pipe.send(
             {
                 "type": "start_request",
-                "request_id": request.id,
-                "hooks": request.dump_hooks(),
+                **request.model_dump(),
             }
         )
         message = self._recv_request_message(worker, timeout_s=5.0)
-        assert message.type == "request_started", (
-            f"unexpected_worker_message:{message.type}"
-        )
+        assert (
+            message.type == "request_started"
+        ), f"unexpected_worker_message:{message.type}"
 
         return Job(
             worker=worker,
-            queued_request=queued_request,
+            request=request,
             input_ids=request.input_ids,
             seq_len=len(request.input_ids),
         )
 
     def _wait_for_request_batch(
         self,
-    ) -> list[tuple[QueuedRequest, WorkerSlot]]:
+    ) -> list[tuple[Request, WorkerSlot]]:
         """
         Wait max batch_window_ms for more requests to arrive.
 
         Returns:
-            list[tuple[QueuedRequest, WorkerSlot]]: A list of queued requests and idle workers.
+            list[tuple[Request, WorkerSlot]]: A list of requests and idle workers.
         """
         if self._closed:
             return []
@@ -217,7 +209,9 @@ class Engine:
         # Wait some window of time for more requests to arrive
         deadline = time.monotonic() + (self.batch_window_ms / 1000.0)
         target_batch_size = len(self._idle_workers)
-        while not self._closed and len(self._pending_requests) < target_batch_size:
+        while (
+            not self._closed and len(self._pending_requests) < target_batch_size
+        ):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -233,7 +227,7 @@ class Engine:
         if batch_size == 0:
             return []
 
-        assignments: list[tuple[QueuedRequest, WorkerSlot]] = []
+        assignments: list[tuple[Request, WorkerSlot]] = []
         for _ in range(batch_size):
             assignments.append(
                 (
@@ -278,7 +272,6 @@ class Engine:
             ):
                 raise RuntimeError(f"unexpected_worker_ready_message:{message}")
 
-
             workers.append(
                 WorkerSlot(
                     worker_id=worker_id,
@@ -295,9 +288,7 @@ class Engine:
             self._closed = True
             pending_requests = list(self._pending_requests)
             self._pending_requests.clear()
-            active_requests = [
-                job.queued_request for job in self._live_jobs
-            ]
+            active_requests = [job.request for job in self._batch.jobs]
             self._condition.notify_all()
 
         for request in pending_requests:
@@ -313,7 +304,7 @@ class Engine:
 
         for worker in self._workers:
             try:
-                worker.pipe.send({"type": "shutdown"})
+                worker.pipe.send({"type": "shutdown", "request_id": ""})
             except (BrokenPipeError, EOFError, OSError):
                 pass
 

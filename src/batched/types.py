@@ -9,9 +9,16 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import torch.multiprocessing as mp
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    model_validator,
+    field_validator,
+    model_serializer,
+)
 
 _HOOKPOINT_RE = re.compile(r"^transformer\.h\.(\d+)\.(attn|mlp|resid)$")
+
 
 class Hook(BaseModel):
     fn: str
@@ -30,10 +37,16 @@ class Request(BaseModel):
     input_ids: list[int]
     hooks: dict[str, Hook] = Field(default_factory=dict)
 
-    def dump_hooks(self) -> dict[str, dict[str, Any]]:
+    done: threading.Event = field(default_factory=threading.Event)
+
+    @model_serializer(mode="json")
+    def serialize(self) -> dict[str, Any]:
         return {
-            hookpoint: hook.model_dump(mode="python")
-            for hookpoint, hook in self.hooks.items()
+            "id": self.id,
+            "hooks": {
+                hookpoint: hook.model_dump(mode="python")
+                for hookpoint, hook in self.hooks.items()
+            },
         }
 
     @field_validator("prompt", mode="after")
@@ -43,15 +56,24 @@ class Request(BaseModel):
             raise ValueError("empty_prompt")
         return v
 
-    
+class StartRequest(BaseModel):
+    type: Literal["start_request"]
+    hooks: dict[str, Hook]
+
+
+class HookRequest(BaseModel):
+    type: Literal["apply_hooks"]
+    hookpoint: str
+    tensor: Any
+
+
+class ShutdownRequest(BaseModel):
+    type: Literal["shutdown"]
 
 
 class WorkerRequest(BaseModel):
-    type: Literal["start_request", "apply_hooks", "finish_request", "shutdown"]
-    request_id: str = ""
-    hooks: dict[str, Hook] = Field(default_factory=dict)
-    hookpoint: str = ""
-    tensor: Any | None = None
+    req: StartRequest | HookRequest | ShutdownRequest
+    request_id: str
 
 
 class WorkerResponse(BaseModel):
@@ -81,17 +103,9 @@ class WorkerSlot:
     process: mp.Process
 
 
-@dataclass
-class QueuedRequest:
-    request: Request
-    status: str = "queued"
-    done: threading.Event = field(default_factory=threading.Event)
-
-
 __all__ = [
     "CompiledHook",
     "Hook",
-    "QueuedRequest",
     "Request",
     "WorkerRequest",
     "WorkerRequestRuntime",
