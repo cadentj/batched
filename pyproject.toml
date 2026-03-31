@@ -19,3 +19,9 @@ packages = ["src/batched"]
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "isort>=8.0.1",
+    "ruff>=0.15.8",
+]

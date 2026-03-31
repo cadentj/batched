@@ -6,12 +6,8 @@ import time
 import torch as t
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from batched import (
-    Hook,
-    Request,
-    BatchedModel,
-    register_torch_varlen_attention,
-)
+from batched import (BatchedModel, Hook, Request,
+                     register_torch_varlen_attention)
 
 
 def main() -> None:
@@ -21,10 +17,14 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        attn_implementation="torch_varlen",
-    ).to("cuda:0").to(t.bfloat16)
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_name,
+            attn_implementation="torch_varlen",
+        )
+        .to("cuda:0")
+        .to(t.bfloat16)
+    )
     model.eval()
 
     slow_hook = (

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import types
+from collections.abc import Callable
 from typing import Any
 
 import torch as t
@@ -15,9 +15,8 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
     decode). Custom block forwards may shorten the sequence; the final reshape
     uses length after ln_f instead of the input length.
     """
-    from transformers.modeling_outputs import (
-        BaseModelOutputWithPastAndCrossAttentions,
-    )
+    from transformers.modeling_outputs import \
+        BaseModelOutputWithPastAndCrossAttentions
 
     def forward(
         self,
@@ -33,14 +32,20 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
         use_cache=None,
         **kwargs,
     ):
-        del past_key_values, use_cache, encoder_hidden_states, encoder_attention_mask, inputs_embeds, token_type_ids,
+        del (
+            past_key_values,
+            use_cache,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            inputs_embeds,
+            token_type_ids,
+        )
         cache_position
 
         assert position_ids is not None
 
         kwargs.pop("output_attentions", None)
         kwargs.pop("output_hidden_states", None)
-
 
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
@@ -69,10 +74,7 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
         hidden_states = self.ln_f(hidden_states)
         seq_len = hidden_states.shape[-2]
         output_shape = (
-            (-1,)
-            + input_shape[1:-1]
-            + (seq_len,)
-            + (hidden_states.size(-1),)
+            (-1,) + input_shape[1:-1] + (seq_len,) + (hidden_states.size(-1),)
         )
         hidden_states = hidden_states.view(output_shape)
 

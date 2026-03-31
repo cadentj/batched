@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import os
+
 
 def warn_if_mps_daemon_inactive(
     cuda_mps_pipe_directory: str | None,

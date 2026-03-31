@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from multiprocessing.connection import Connection, wait
 import time
+from multiprocessing.connection import Connection, wait
 from typing import Any
 
 import torch as t
 from transformers import AutoModelForCausalLM
 
-from .const import DEVICE
 from .engine import Batch, Engine, Job
-from .gpt2 import (
-    patch_gpt2_blocks_for_async,
-    patch_gpt2_transformer_for_trimmed_sequences,
-)
+from .gpt2 import (patch_gpt2_blocks_for_async,
+                   patch_gpt2_transformer_for_trimmed_sequences)
 from .torch_varlen_attention import register_torch_varlen_attention
 from .types import Request, WorkerRequest, WorkerResponse, WorkerSlot
 
 _TORCH_VARLEN_ATTN_IMPL = "torch_varlen"
+DEVICE = "cuda:0"
+DTYPE = t.bfloat16
 
 
 class AllJobsPaused(RuntimeError):
@@ -129,15 +128,10 @@ class BatchedModel(Engine):
             end = start + job.seq_len
             module_slice = module_tensor[:, start:end, :]
             residual_slice = (
-                None
-                if residual_tensor is None
-                else residual_tensor[:, start:end, :]
+                None if residual_tensor is None else residual_tensor[:, start:end, :]
             )
 
-            if (
-                job.pending_hookpoint is not None
-                and job.pending_hookpoint != hookpoint
-            ):
+            if job.pending_hookpoint is not None and job.pending_hookpoint != hookpoint:
                 next_chunks_by_job_id[job.request.id] = _compose_gpt2_residual(
                     hook_kind,
                     module_slice,
@@ -154,10 +148,7 @@ class BatchedModel(Engine):
                 continue
 
             hook_jobs.append(job)
-            if (
-                job.pending_hookpoint == hookpoint
-                and job.computed_response is not None
-            ):
+            if job.pending_hookpoint == hookpoint and job.computed_response is not None:
                 continue
 
             job.worker.pipe.send(
@@ -178,9 +169,7 @@ class BatchedModel(Engine):
             end = start + job.seq_len
             module_slice = module_tensor[:, start:end, :]
             residual_slice = (
-                None
-                if residual_tensor is None
-                else residual_tensor[:, start:end, :]
+                None if residual_tensor is None else residual_tensor[:, start:end, :]
             )
             op = job.request.hooks[hookpoint].op
 
@@ -188,9 +177,7 @@ class BatchedModel(Engine):
                 job.is_alive = False
                 job.pending_hookpoint = hookpoint
                 job.cached_residual_tensor = (
-                    None
-                    if residual_slice is None
-                    else residual_slice[0].clone()
+                    None if residual_slice is None else residual_slice[0].clone()
                 )
                 continue
 
@@ -252,9 +239,7 @@ class BatchedModel(Engine):
 
         # TODO(cadentj): enforce max request runtime and recycle stuck workers.
         pending: dict[Connection, Job] = {
-            job.worker.pipe: job
-            for job in jobs
-            if job.computed_response is None
+            job.worker.pipe: job for job in jobs if job.computed_response is None
         }
         if not pending:
             return
@@ -278,8 +263,7 @@ class BatchedModel(Engine):
         pending: dict[Connection, Job] = {
             job.worker.pipe: job
             for job in jobs
-            if job.pending_hookpoint is not None
-            and job.computed_response is None
+            if job.pending_hookpoint is not None and job.computed_response is None
         }
         if not pending:
             return
@@ -309,9 +293,7 @@ class BatchedModel(Engine):
         finished_ids = {job.request.id for job in jobs}
         with self._condition:
             self._batch.jobs = [
-                job
-                for job in self._batch.jobs
-                if job.request.id not in finished_ids
+                job for job in self._batch.jobs if job.request.id not in finished_ids
             ]
             for job in jobs:
                 self._idle_workers.append(job.worker)

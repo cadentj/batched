@@ -1,9 +1,9 @@
 """
 Basic Transformers attention implementation using `torch.nn.attention.varlen.varlen_attn`.
 
-- Expects CUDA and a PyTorch build with `torch.nn.attention.varlen`. 
-- The `dropout` argument must be zero. 
-- Requires packed inputs. So `batch_size == 1`. 
+- Expects CUDA and a PyTorch build with `torch.nn.attention.varlen`.
+- The `dropout` argument must be zero.
+- Requires packed inputs. So `batch_size == 1`.
   Position IDs which restart at 0 per concatenated segment.
 """
 
@@ -13,17 +13,17 @@ import math
 
 import torch
 from torch.nn.attention.varlen import varlen_attn
-
 from transformers.integrations.sdpa_attention import repeat_kv
 from transformers.modeling_flash_attention_utils import (
-    _prepare_from_posids,
-    fa_peft_integration_check,
-    flash_attn_supports_top_left_mask,
-)
+    _prepare_from_posids, fa_peft_integration_check,
+    flash_attn_supports_top_left_mask)
 from transformers.pytorch_utils import Conv1D
 
-def _get_target_dtype(query: torch.Tensor, module: torch.nn.Module) -> torch.dtype | None:
-    """Like `get_target_dtype` from transformers.integrations.flash_attention, 
+
+def _get_target_dtype(
+    query: torch.Tensor, module: torch.nn.Module
+) -> torch.dtype | None:
+    """Like `get_target_dtype` from transformers.integrations.flash_attention,
     but GPT-2 attention uses `Conv1D`, not `nn.Linear`."""
     if query.dtype != torch.float32:
         return None
@@ -69,7 +69,9 @@ def torch_varlen_attention_forward(
     assert position_ids is not None, "position ids required"
 
     assert kwargs.get("dropout", 0.0) == 0.0, "attn dropout not supported"
-    assert kwargs.get("attention_mask") is None, "varlen attn doesn't use attention mask"
+    assert kwargs.get("attention_mask") is None, (
+        "varlen attn doesn't use attention mask"
+    )
 
     seq_len = query.shape[2]
     is_causal = (

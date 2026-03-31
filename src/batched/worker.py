@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-from multiprocessing.connection import Connection
 import os
+from multiprocessing.connection import Connection
 from typing import Any
 
 import torch as t
 import torch.multiprocessing as mp
 
-from .types import (
-    CompiledHook,
-    WorkerRequest,
-    WorkerRequestRuntime,
-    WorkerResponse,
-    StartRequest,
-    HookRequest,
-)
+from .types import (CompiledHook, HookRequest, StartRequest, WorkerRequest,
+                    WorkerRequestRuntime, WorkerResponse)
 
 
 class InterventionWorker:

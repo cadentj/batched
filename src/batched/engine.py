@@ -1,18 +1,17 @@
 from __future__ import annotations
 
+import threading
+import time
 from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass
-import threading
-import time
 
 import torch as t
 import torch.multiprocessing as mp
 
 from .types import Request, WorkerRequest, WorkerResponse, WorkerSlot
-
-from .worker import _worker_main
 from .utils import warn_if_mps_daemon_inactive
+from .worker import _worker_main
 
 
 @dataclass
@@ -29,6 +28,7 @@ class Job:
 
     idx_in_batch: int = 0
     is_alive: bool = True
+
 
 @dataclass
 class Batch:
@@ -81,13 +81,13 @@ class Engine:
         assert n > 0, "n must be positive"
         assert batch_window_ms >= 0, "batch_window_ms must be non-negative"
         if worker_memory_fraction is not None:
-            assert (
-                0.0 < worker_memory_fraction <= 1.0
-            ), "worker_memory_fraction must be in the range (0, 1]"
+            assert 0.0 < worker_memory_fraction <= 1.0, (
+                "worker_memory_fraction must be in the range (0, 1]"
+            )
         if cuda_mps_active_thread_percentage is not None:
-            assert (
-                1 <= cuda_mps_active_thread_percentage <= 100
-            ), "cuda_mps_active_thread_percentage must be in the range [1, 100]"
+            assert 1 <= cuda_mps_active_thread_percentage <= 100, (
+                "cuda_mps_active_thread_percentage must be in the range [1, 100]"
+            )
 
         warn_if_mps_daemon_inactive(cuda_mps_pipe_directory)
 
@@ -186,9 +186,9 @@ class Engine:
             ).model_dump(mode="python")
         )
         message = self._recv_request_message(worker, timeout_s=5.0)
-        assert (
-            message.type == "request_started"
-        ), f"unexpected_worker_message:{message.type}"
+        assert message.type == "request_started", (
+            f"unexpected_worker_message:{message.type}"
+        )
 
         return Job(
             worker=worker,
@@ -214,9 +214,7 @@ class Engine:
         # Wait some window of time for more requests to arrive
         deadline = time.monotonic() + (self.batch_window_ms / 1000.0)
         target_batch_size = len(self._idle_workers)
-        while (
-            not self._closed and len(self._pending_requests) < target_batch_size
-        ):
+        while not self._closed and len(self._pending_requests) < target_batch_size:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

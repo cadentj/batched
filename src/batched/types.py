@@ -1,21 +1,16 @@
 from __future__ import annotations
 
+import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-import re
-import threading
 from typing import Any, Literal
 from uuid import uuid4
 
 import torch.multiprocessing as mp
-from pydantic import (
-    BaseModel,
-    Field,
-    PrivateAttr,
-    model_validator,
-    field_validator,
-)
+from pydantic import (BaseModel, Field, PrivateAttr, field_validator,
+                      model_validator)
 
 _HOOKPOINT_RE = re.compile(r"^transformer\.h\.(\d+)\.(attn|mlp|resid)$")
 
