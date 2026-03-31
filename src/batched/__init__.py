@@ -2,7 +2,7 @@ from .torch_varlen_attention import (
     register_torch_varlen_attention,
     torch_varlen_attention_forward,
 )
-from .engine import BatchedModel
+from .model import BatchedModel
 from .types import Hook, Request
 
 __all__ = [

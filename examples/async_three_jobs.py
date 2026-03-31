@@ -51,10 +51,10 @@ def main() -> None:
         Request(input_ids=tokenize("fast a"), hooks={}),
         Request(input_ids=tokenize("fast b"), hooks={}),
     ]
+    labels = ["slow job", "fast a", "fast b"]
 
     runtime = BatchedModel(
         model=model,
-        tokenizer=tokenizer,
         n=3,
         batch_window_ms=500,
         hook_wait_ms=100,
@@ -63,17 +63,21 @@ def main() -> None:
     results: list[tuple[str, str, float]] = []
     lock = threading.Lock()
 
-    def run_one(req: Request) -> None:
+    def run_one(label: str, req: Request) -> None:
         t0 = time.perf_counter()
         status = runtime(req)
         dt = time.perf_counter() - t0
         with lock:
-            results.append((req.prompt, status, dt))
+            results.append((label, status, dt))
             print(results, flush=True)
 
     threads = [
-        threading.Thread(target=run_one, args=(req,), name=f"req-{i}")
-        for i, req in enumerate(requests)
+        threading.Thread(
+            target=run_one,
+            args=(label, req),
+            name=f"req-{i}",
+        )
+        for i, (label, req) in enumerate(zip(labels, requests))
     ]
     print("starting threads")
     for th in threads:

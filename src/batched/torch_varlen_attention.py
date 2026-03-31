@@ -10,7 +10,6 @@ Basic Transformers attention implementation using `torch.nn.attention.varlen.var
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 
 import torch
 from torch.nn.attention.varlen import varlen_attn
@@ -107,7 +106,6 @@ def register_torch_varlen_attention(name: str) -> None:
 
 
 __all__ = [
-    "pack_sequences_for_causal_lm",
     "register_torch_varlen_attention",
     "torch_varlen_attention_forward",
 ]

@@ -15,7 +15,6 @@ def patch_gpt2_transformer_for_trimmed_sequences(transformer: Any) -> None:
     decode). Custom block forwards may shorten the sequence; the final reshape
     uses length after ln_f instead of the input length.
     """
-    import torch
     from transformers.modeling_outputs import (
         BaseModelOutputWithPastAndCrossAttentions,
     )

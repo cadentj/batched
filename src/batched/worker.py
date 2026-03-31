@@ -22,11 +22,9 @@ class InterventionWorker:
         self,
         worker_id: int,
         pipe: Connection,
-        shutdown: mp.synchronize.Event,
     ):
         self.worker_id = worker_id
         self.pipe = pipe
-        self.shutdown = shutdown
         self._current_request_id: str | None = None
         self._current_request_runtime: WorkerRequestRuntime | None = None
 
@@ -46,7 +44,7 @@ class InterventionWorker:
             raise ValueError("missing_hook")
         return hook_fn
 
-    def _start_request(self, message: StartRequest) -> None:
+    def _start_request(self, request_id: str, message: StartRequest) -> None:
         self._current_request_id = None
         self._current_request_runtime = None
         scope: dict[str, Any] = {"torch": t, "t": t, "state": {}}
@@ -55,7 +53,7 @@ class InterventionWorker:
         for hookpoint, hook in message.hooks.items():
             hook_fn = self._compile_hook(
                 source=hook.fn,
-                request_id=message.request_id,
+                request_id=request_id,
                 hookpoint=hookpoint,
                 scope=scope,
             )
@@ -65,7 +63,7 @@ class InterventionWorker:
                 fn=hook_fn,
             )
 
-        self._current_request_id = message.request_id
+        self._current_request_id = request_id
         self._current_request_runtime = WorkerRequestRuntime(
             hooks=compiled_hooks,
             scope=scope,
@@ -73,13 +71,13 @@ class InterventionWorker:
         self.pipe.send(
             WorkerResponse(
                 type="request_started",
-                request_id=message.request_id,
+                request_id=request_id,
             )
         )
 
-    def _apply_hooks(self, message: HookRequest) -> None:
+    def _apply_hooks(self, request_id: str, message: HookRequest) -> None:
         if self._current_request_runtime is None:
-            raise RuntimeError(f"missing_runtime:{message.request_id}")
+            raise RuntimeError(f"missing_runtime:{request_id}")
         if not isinstance(message.tensor, t.Tensor):
             raise TypeError("missing_tensor")
 
@@ -99,7 +97,7 @@ class InterventionWorker:
         self.pipe.send(
             WorkerResponse(
                 type="hooks_applied",
-                request_id=message.request_id,
+                request_id=request_id,
                 tensor=result,
             )
         )
@@ -107,17 +105,19 @@ class InterventionWorker:
     def run(self) -> None:
         self.pipe.send({"type": "worker_ready", "worker_id": self.worker_id})
 
-        while not self.shutdown.is_set():
+        while True:
             if not self.pipe.poll(0.05):
                 continue
 
-            message = WorkerRequest.model_validate(self.pipe.recv()).req
+            envelope = WorkerRequest.model_validate(self.pipe.recv())
+            request_id = envelope.request_id
+            message = envelope.req
 
             if message.type == "start_request":
-                self._start_request(message)
+                self._start_request(request_id, message)
                 continue
             if message.type == "apply_hooks":
-                self._apply_hooks(message)
+                self._apply_hooks(request_id, message)
                 continue
             if message.type == "shutdown":
                 return
@@ -126,7 +126,6 @@ class InterventionWorker:
 def _worker_main(
     worker_id: int,
     pipe: Connection,
-    shutdown: mp.synchronize.Event,
     worker_memory_fraction: float | None,
     cuda_mps_pipe_directory: str | None,
     cuda_mps_active_thread_percentage: int | None,
@@ -146,7 +145,7 @@ def _worker_main(
         else:
             t.cuda.set_per_process_memory_fraction(worker_memory_fraction)
 
-    InterventionWorker(worker_id=worker_id, pipe=pipe, shutdown=shutdown).run()
+    InterventionWorker(worker_id=worker_id, pipe=pipe).run()
 
 
 __all__ = ["InterventionWorker", "_worker_main"]

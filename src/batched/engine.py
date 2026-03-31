@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from abc import abstractmethod
 from collections import deque
 from dataclasses import dataclass
-from abc import abstractmethod
-import time
 import threading
+import time
+
 import torch as t
 import torch.multiprocessing as mp
-from .types import Request, WorkerResponse, WorkerSlot
+
+from .types import Request, WorkerRequest, WorkerResponse, WorkerSlot
 
 from .worker import _worker_main
 from .utils import warn_if_mps_daemon_inactive
@@ -34,7 +36,7 @@ class Batch:
 
     @property
     def is_empty(self) -> bool:
-        return len(self.jobs) > 0
+        return len(self.jobs) == 0
 
     def extend(self, jobs: list[Job]) -> None:
         self.jobs.extend(jobs)
@@ -56,7 +58,7 @@ class Batch:
 
         return jobs
 
-    def packed_position_ids(self) -> list[int]:
+    def packed_position_ids(self, alive_only: bool = True) -> list[int]:
         if alive_only:
             jobs = self.live_jobs()
         else:
@@ -94,7 +96,6 @@ class Engine:
 
         # CUDA tensor IPC between processes requires spawn-safe workers.
         self._mp_context = mp.get_context("spawn")
-        self._shutdown = self._mp_context.Event()
         self._condition = threading.Condition()
         self._closed = False
 
@@ -176,10 +177,13 @@ class Engine:
         worker: WorkerSlot,
     ) -> Job:
         worker.pipe.send(
-            {
-                "type": "start_request",
-                **request.model_dump(),
-            }
+            WorkerRequest(
+                request_id=request.id,
+                req={
+                    "type": "start_request",
+                    "hooks": request.dump_hooks(),
+                },
+            ).model_dump(mode="python")
         )
         message = self._recv_request_message(worker, timeout_s=5.0)
         assert (
@@ -253,7 +257,6 @@ class Engine:
                 args=(
                     worker_id,
                     child_pipe,
-                    self._shutdown,
                     worker_memory_fraction,
                     cuda_mps_pipe_directory,
                     cuda_mps_active_thread_percentage,
@@ -301,11 +304,15 @@ class Engine:
             request.done.set()
 
         self._scheduler.join(timeout=5.0)
-        self._shutdown.set()
 
         for worker in self._workers:
             try:
-                worker.pipe.send({"type": "shutdown", "request_id": ""})
+                worker.pipe.send(
+                    WorkerRequest(
+                        request_id="",
+                        req={"type": "shutdown"},
+                    ).model_dump(mode="python")
+                )
             except (BrokenPipeError, EOFError, OSError):
                 pass
 

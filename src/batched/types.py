@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from multiprocessing.connection import Connection
 import re
 import threading
@@ -12,9 +12,9 @@ import torch.multiprocessing as mp
 from pydantic import (
     BaseModel,
     Field,
+    PrivateAttr,
     model_validator,
     field_validator,
-    model_serializer,
 )
 
 _HOOKPOINT_RE = re.compile(r"^transformer\.h\.(\d+)\.(attn|mlp|resid)$")
@@ -36,26 +36,34 @@ class Request(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     input_ids: list[int]
     hooks: dict[str, Hook] = Field(default_factory=dict)
+    _done: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _status: str = PrivateAttr(default="queued")
 
-    done: threading.Event = field(default_factory=threading.Event)
-    status: str = "none"
-
-    @model_serializer(mode="json")
-    def serialize(self) -> dict[str, Any]:
+    def dump_hooks(self) -> dict[str, dict[str, Any]]:
         return {
-            "id": self.id,
-            "hooks": {
-                hookpoint: hook.model_dump(mode="python")
-                for hookpoint, hook in self.hooks.items()
-            },
+            hookpoint: hook.model_dump(mode="python")
+            for hookpoint, hook in self.hooks.items()
         }
 
-    @field_validator("prompt", mode="after")
+    @field_validator("input_ids", mode="after")
     @classmethod
-    def has_prompt(cls, v: str) -> str:
+    def has_input_ids(cls, v: list[int]) -> list[int]:
         if len(v) == 0:
-            raise ValueError("empty_prompt")
+            raise ValueError("empty_input_ids")
         return v
+
+    @property
+    def done(self) -> threading.Event:
+        return self._done
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self._status = value
+
 
 class StartRequest(BaseModel):
     type: Literal["start_request"]
@@ -78,7 +86,7 @@ class WorkerRequest(BaseModel):
 
 
 class WorkerResponse(BaseModel):
-    type: Literal["request_started", "hooks_applied", "request_finished"]
+    type: Literal["request_started", "hooks_applied"]
     request_id: str
     # t.Tensor is not serializable, just use Any
     tensor: Any | None = None
